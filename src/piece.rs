@@ -1,6 +1,7 @@
 use crate::consts::TetriminoType;
+use bevy::prelude::*;
 
-#[derive(Copy, Clone)]
+#[derive(Component, Copy, Clone)]
 pub struct Position {
     pub X: f32,
     pub Y: f32,

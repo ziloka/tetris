@@ -1,16 +1,16 @@
 use crate::{
-    consts::{TetriminoType, BOARD},
+    consts::{TetriminoType, Delta},
     piece::Position,
 };
 use bevy::prelude::*;
 
-#[derive(Copy, Clone)]
+#[derive(Component, Copy, Clone)]
 pub struct SelectedTetrimino {
     pub tetrimino_type: TetriminoType,
     pub position: Position,
 }
 
-#[derive(Component, Copy, Clone)]
+#[derive(Bundle, Copy, Clone)]
 pub struct Board {
     pub active_piece: SelectedTetrimino,
 }

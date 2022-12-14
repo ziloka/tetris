@@ -29,16 +29,19 @@ impl BOARD {
         Y: (BOARD::HEIGHT / 2.0) * BOARD::TETRIOMINO_SIDE_LENGTH,
     };
 }
-
-struct Delta {
-    x: f32,
-    y: f32,
+#[derive(Copy, Clone)]
+pub struct Delta {
+    pub x: f32,
+    pub y: f32,
 }
+
+#[derive(Component, Copy, Clone)]
+pub struct ActivePiece;
 
 // https://stackoverflow.com/questions/31012923/what-is-the-difference-between-copy-and-clone
 // https://stackoverflow.com/a/31013047
 // By the way, every Copy type is also required to be Clone. However, they are not required to do the same thing! For your own types, .clone() can be an arbitrary method of your choice, whereas implicit copying will always trigger a memcpy, not the clone(&self) implementation.
-#[derive(Component, Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum TetriminoType {
     I,
     O,
