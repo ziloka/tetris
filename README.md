@@ -1,5 +1,21 @@
 Something similar to [four-tris](https://github.com/fiorescarlatto/four-tris)
 
+# Multiplayer (SpacetimeDB)
+
+The multiplayer client uses the SpacetimeDB Rust SDK and requires module bindings.
+
+## Local run (desktop)
+
+1. Install the SpacetimeDB CLI.
+2. Build and publish the server module:
+   - `spacetime publish tetris-mp --project-path crates/tetris-server`
+3. Generate Rust bindings for the client:
+   - `spacetime generate --lang rust --out-dir src/module_bindings --project-path crates/tetris-server`
+4. Run the client:
+   - `cargo run`
+
+Open two clients, create a room in one, join with the same code in the other.
+
 # Notes
 
 The coordinate system is in the [center of the screen](https://bevy-cheatbook.github.io/features/coords.html?highlight=coordinate#2d-and-3d-scenes-and-cameras)

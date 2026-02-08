@@ -4,4 +4,6 @@ pub mod extensions;
 pub mod drawer;
 pub mod game;
 pub mod input;
+pub mod module_bindings;
+pub mod net;
 pub mod ui;

@@ -1,1 +1,1 @@
-pub mod logic;
+pub use tetris_core::logic;

@@ -5,6 +5,12 @@ edition = "2021"
 default-run = "client"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[workspace]
+members = [
+    "crates/tetris-core",
+    "crates/tetris-server",
+]
+
 [lib]
 name = "tetris"
 path = "src/lib.rs"
@@ -15,6 +21,8 @@ path = "src/bin/client.rs"
 
 [dependencies]
 macroquad = "0.4"
+tetris-core = { path = "crates/tetris-core" }
+spacetimedb-sdk = "1.12.0"
 # futures = "0.3.30"
 
 # for replay files
