@@ -1,9 +1,11 @@
-use spacetimedb_sdk::{credentials, Error};
+use std::env;
 
-use crate::module_bindings::{DbConnection, ErrorContext, Identity};
+use spacetimedb_sdk::{credentials, DbContext, Error, Identity};
 
-const HOST: &str = "http://localhost:3000";
-const DB_NAME: &str = "tetris-mp";
+use crate::module_bindings::{DbConnection, ErrorContext};
+
+const DEFAULT_HOST: &str = "https://maincloud.spacetimedb.com";
+const DEFAULT_DB: &str = "c200c68e0798a5be4e7eae538b449372e398f028ec59b85c0d9d9a44e2ee6822";
 
 pub struct NetClient {
     pub conn: DbConnection,
@@ -15,13 +17,16 @@ pub struct NetClient {
 
 impl NetClient {
     pub fn connect() -> Result<Self, Error> {
+        let token = creds_store().load().ok().flatten();
+        let host = host();
+        let db = db_name();
         let conn = DbConnection::builder()
             .on_connect(on_connected)
             .on_connect_error(on_connect_error)
             .on_disconnect(on_disconnected)
-            .with_token(creds_store().load().ok())
-            .with_module_name(DB_NAME)
-            .with_uri(HOST)
+            .with_token(token)
+            .with_module_name(db)
+            .with_uri(host)
             .build()?;
 
         conn.subscription_builder()
@@ -38,7 +43,7 @@ impl NetClient {
 }
 
 fn creds_store() -> credentials::File {
-    credentials::File::new(DB_NAME)
+    credentials::File::new(db_name())
 }
 
 fn on_connected(_ctx: &DbConnection, _identity: Identity, token: &str) {
@@ -48,3 +53,11 @@ fn on_connected(_ctx: &DbConnection, _identity: Identity, token: &str) {
 fn on_connect_error(_ctx: &ErrorContext, _err: Error) {}
 
 fn on_disconnected(_ctx: &ErrorContext, _err: Option<Error>) {}
+
+pub fn host() -> String {
+    env::var("TETRIS_HOST").unwrap_or_else(|_| DEFAULT_HOST.to_string())
+}
+
+pub fn db_name() -> String {
+    env::var("TETRIS_DB").unwrap_or_else(|_| DEFAULT_DB.to_string())
+}

@@ -1,9 +1,8 @@
-use spacetimedb::{reducer, table, Identity, ReducerContext, Table, UniqueColumn};
+use spacetimedb::{reducer, table, Identity, ReducerContext, Table};
 use tetris_core::logic::{board::{Board, BoardSnapshot}, score::Action};
 
 const STATUS_LOBBY: u8 = 0;
 const STATUS_ACTIVE: u8 = 1;
-const STATUS_FINISHED: u8 = 2;
 
 #[table(name = room, public)]
 pub struct Room {

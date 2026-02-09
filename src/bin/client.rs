@@ -1,12 +1,14 @@
 use std::cell::Cell;
 
 use macroquad::{
-    input::{get_char_pressed, is_key_pressed},
+    input::{get_char_pressed, is_key_pressed, is_mouse_button_pressed, mouse_position},
     main,
-    prelude::{draw_text, is_key_down, KeyCode, BLACK, WHITE},
+    prelude::{draw_rectangle, draw_rectangle_lines, draw_text, is_key_down, Color, KeyCode, Rect, MouseButton, BLACK, WHITE},
     window::{clear_background, next_frame, screen_height, screen_width},
 };
 
+use std::sync::mpsc::{self, Sender, TryRecvError};
+use std::thread;
 use tetris::{
     core::logic::{
         board::{
@@ -16,10 +18,14 @@ use tetris::{
         consts::vec2,
     },
     drawer::Drawer,
-    net::NetClient,
+    net::{db_name, host, NetClient},
 };
 
-use tetris::module_bindings::BoardState;
+use tetris::module_bindings::{
+    create_room, join_room, start_match, submit_input, tick, BoardState,
+    BoardStateTableAccess, MatchStateTableAccess, PlayerTableAccess, RoomTableAccess,
+};
+use spacetimedb_sdk::{table::Table, DbContext, Status};
 
 enum UiMode {
     Menu,
@@ -27,16 +33,26 @@ enum UiMode {
     Playing,
 }
 
+enum PendingAction {
+    Create(String),
+    Join(String),
+}
+
 #[main("Tetris Multiplayer")]
 async fn main() {
-    let mut net = match NetClient::connect() {
-        Ok(client) => client,
-        Err(_) => return,
-    };
+    let (net_tx, net_rx) = mpsc::channel();
+    let (ui_tx, ui_rx) = mpsc::channel();
+    spawn_connect(net_tx.clone());
+    let mut net: Option<NetClient> = None;
+    let mut net_error: Option<String> = None;
+    let mut callbacks_registered = false;
+    let mut pending_action: Option<PendingAction> = None;
 
     let mut mode = UiMode::Menu;
     let mut input_code = String::new();
+    let mut input_focused = true;
     let mut create_mode = true;
+    let mut ui_message: Option<String> = None;
 
     let board_offset = Cell::new(vec2(40.0, screen_height() - 40.0));
     let opp_offset = Cell::new(vec2(420.0, screen_height() - 40.0));
@@ -55,110 +71,330 @@ async fn main() {
 
     loop {
         clear_background(BLACK);
-        let _ = net.conn.frame_tick();
+        if let Some(client) = net.as_ref() {
+            let _ = client.conn.frame_tick();
+        }
 
         match mode {
             UiMode::Menu => {
                 draw_text("Multiplayer Tetris", 40.0, 40.0, 30.0, WHITE);
-                draw_text(
-                    "Press C to create, J to join. Type room code, Enter to confirm.",
+                draw_text("Create or join a room", 40.0, 70.0, 22.0, WHITE);
+                match net.as_ref() {
+                    Some(_) => {
+                        draw_text("Connected.", 40.0, 95.0, 18.0, WHITE);
+                    }
+                    None => {
+                        let status = net_error
+                            .as_deref()
+                            .unwrap_or("Connecting to server...");
+                        draw_text(status, 40.0, 95.0, 18.0, WHITE);
+                        draw_text(&format!("Host: {} | DB: {}", host(), db_name()), 40.0, 115.0, 18.0, WHITE);
+                    }
+                }
+                let create_clicked = draw_button(40.0, 140.0, 140.0, 36.0, "Create", create_mode, true);
+                let join_clicked = draw_button(190.0, 140.0, 140.0, 36.0, "Join", !create_mode, true);
+                if create_clicked || is_key_pressed(KeyCode::C) {
+                    create_mode = true;
+                }
+                if join_clicked || is_key_pressed(KeyCode::J) {
+                    create_mode = false;
+                }
+
+                let retry_enabled = net_error.is_some() || net.is_none();
+                if draw_button(340.0, 140.0, 140.0, 36.0, "Retry", false, retry_enabled)
+                    || (net_error.is_some() && is_key_pressed(KeyCode::R))
+                {
+                    net_error = None;
+                    net = None;
+                    pending_action = None;
+                    spawn_connect(net_tx.clone());
+                }
+
+                let input_box_clicked = draw_input_box(
                     40.0,
-                    70.0,
+                    200.0,
+                    300.0,
+                    40.0,
+                    "Room code",
+                    &input_code,
+                    input_focused,
+                );
+                if input_box_clicked {
+                    input_focused = true;
+                } else if is_mouse_button_pressed(MouseButton::Left) {
+                    input_focused = false;
+                }
+
+                if input_focused {
+                    if let Some(ch) = get_char_pressed() {
+                        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                            input_code.push(ch.to_ascii_uppercase());
+                        }
+                    }
+                    if is_key_pressed(KeyCode::Backspace) {
+                        input_code.pop();
+                    }
+                }
+
+                draw_text(
+                    &format!("Mode: {}", if create_mode { "Create" } else { "Join" }),
+                    40.0,
+                    265.0,
                     20.0,
                     WHITE,
                 );
-                if is_key_pressed(KeyCode::C) {
-                    create_mode = true;
-                }
-                if is_key_pressed(KeyCode::J) {
-                    create_mode = false;
-                }
-                if let Some(ch) = get_char_pressed() {
-                    if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                        input_code.push(ch.to_ascii_uppercase());
-                    }
-                }
-                if is_key_pressed(KeyCode::Backspace) {
-                    input_code.pop();
-                }
-                draw_text(
-                    &format!(
-                        "Mode: {} | Code: {}",
-                        if create_mode { "Create" } else { "Join" },
-                        input_code
-                    ),
-                    40.0,
-                    100.0,
-                    22.0,
-                    WHITE,
-                );
 
-                if is_key_pressed(KeyCode::Enter) && !input_code.is_empty() {
+                let can_submit = net.is_some() && !input_code.is_empty();
+                let submit_clicked = draw_button(
+                    40.0,
+                    290.0,
+                    160.0,
+                    40.0,
+                    if create_mode { "Create Room" } else { "Join Room" },
+                    false,
+                    can_submit,
+                );
+                if (submit_clicked || is_key_pressed(KeyCode::Enter)) && !input_code.is_empty() {
+                    let Some(client) = net.as_mut() else {
+                        ui_message = Some("Not connected yet.".to_string());
+                        next_frame().await;
+                        continue;
+                    };
                     if create_mode {
-                        let _ = net.conn.reducers.create_room(input_code.clone());
-                        net.is_owner = true;
+                        if let Err(err) = client.conn.reducers.create_room(input_code.clone()) {
+                            ui_message = Some(format!("Create failed: {err}"));
+                            next_frame().await;
+                            continue;
+                        }
+                        client.is_owner = true;
+                        pending_action = Some(PendingAction::Create(input_code.clone()));
+                        ui_message = Some("Creating room...".to_string());
                     } else {
-                        let _ = net.conn.reducers.join_room(input_code.clone());
+                        if let Err(err) = client.conn.reducers.join_room(input_code.clone()) {
+                            ui_message = Some(format!("Join failed: {err}"));
+                            next_frame().await;
+                            continue;
+                        }
+                        pending_action = Some(PendingAction::Join(input_code.clone()));
+                        ui_message = Some("Joining room...".to_string());
                     }
-                    net.room_code = Some(input_code.clone());
-                    mode = UiMode::Lobby;
+                }
+
+                if let Some(message) = ui_message.as_deref() {
+                    draw_text(message, 40.0, 345.0, 18.0, WHITE);
                 }
             }
             UiMode::Lobby => {
-                draw_text("Waiting for opponent...", 40.0, 40.0, 26.0, WHITE);
-                if let Some(room_code) = net.room_code.clone() {
-                    let player_count = net
-                        .conn
-                        .db
-                        .player()
-                        .iter()
-                        .filter(|player| player.room_code == room_code)
-                        .count();
-                    draw_text(
-                        &format!("Room: {} | Players: {}", room_code, player_count),
-                        40.0,
-                        70.0,
-                        20.0,
-                        WHITE,
-                    );
-                    if net.is_owner && player_count >= 2 && !net.start_sent {
-                        let _ = net.conn.reducers.start_match(room_code.clone());
-                        net.start_sent = true;
-                    }
-                    if net.conn.db.match_state().iter().any(|state| {
-                        state.room_code == room_code && state.status == 1
-                    }) {
-                        mode = UiMode::Playing;
+                draw_text("Waiting room", 40.0, 40.0, 26.0, WHITE);
+                if let Some(client) = net.as_mut() {
+                    if let Some(room_code) = client.room_code.clone() {
+                        let player_count = client
+                            .conn
+                            .db
+                            .player()
+                            .iter()
+                            .filter(|player| player.room_code == room_code)
+                            .count();
+                        draw_text(
+                            &format!("Room: {} | Players: {}", room_code, player_count),
+                            40.0,
+                            70.0,
+                            20.0,
+                            WHITE,
+                        );
+
+                        let identity = client.conn.try_identity();
+                        let room = client
+                            .conn
+                            .db
+                            .room()
+                            .iter()
+                            .find(|room| room.code == room_code);
+                        let is_owner = room
+                            .as_ref()
+                            .and_then(|room| identity.map(|id| room.owner == id))
+                            .unwrap_or(false);
+
+                        if is_owner {
+                            let can_start = player_count >= 2;
+                            if draw_button(
+                                40.0,
+                                110.0,
+                                160.0,
+                                40.0,
+                                "Start Game",
+                                false,
+                                can_start,
+                            ) && can_start
+                            {
+                                let _ = client.conn.reducers.start_match(room_code.clone());
+                                client.start_sent = true;
+                            }
+                        } else {
+                            draw_text("Waiting for host to start...", 40.0, 135.0, 18.0, WHITE);
+                        }
+
+                        if client.conn.db.match_state().iter().any(|state| {
+                            state.room_code == room_code && state.status == 1
+                        }) {
+                            mode = UiMode::Playing;
+                        }
                     }
                 }
             }
             UiMode::Playing => {
-                if let Some(room_code) = net.room_code.clone() {
-                    let input_bits = collect_input_bits();
-                    if input_bits != 0 {
-                        let _ = net
-                            .conn
-                            .reducers
-                            .submit_input(room_code.clone(), input_bits, net.tick);
+                if let Some(client) = net.as_mut() {
+                    if let Some(room_code) = client.room_code.clone() {
+                        let input_bits = collect_input_bits();
+                        if input_bits != 0 {
+                            let _ = client
+                                .conn
+                                .reducers
+                                .submit_input(room_code.clone(), input_bits, client.tick);
+                        }
+                        let _ = client.conn.reducers.tick(room_code.clone());
+                        client.tick += 1;
                     }
-                    let _ = net.conn.reducers.tick(room_code.clone());
-                    net.tick += 1;
-                }
 
-                let boards: Vec<BoardState> = net.conn.db.board_state().iter().collect();
-                let (my_board, opp_board) = split_boards(&boards);
+                    let boards: Vec<BoardState> = client.conn.db.board_state().iter().collect();
+                    let (my_board, opp_board) = split_boards(&boards);
 
-                if let Some(board) = my_board {
-                    draw_board_snapshot(&drawer, board);
+                    if let Some(board) = my_board {
+                        draw_board_snapshot(&drawer, board);
+                    }
+                    if let Some(board) = opp_board {
+                        draw_board_snapshot(&opponent_drawer, board);
+                    }
                 }
-                if let Some(board) = opp_board {
-                    draw_board_snapshot(&opponent_drawer, board);
+            }
+        }
+
+        if net.is_none() {
+            match net_rx.try_recv() {
+                Ok(Ok(client)) => net = Some(client),
+                Ok(Err(err)) => net_error = Some(err.to_string()),
+                Err(TryRecvError::Disconnected) => {
+                    net_error = Some("Failed to start network client.".to_string())
                 }
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+
+        if let Ok(message) = ui_rx.try_recv() {
+            ui_message = Some(message);
+            pending_action = None;
+        }
+
+        if let Some(client) = net.as_ref() {
+            if !callbacks_registered {
+                let tx = ui_tx.clone();
+                client.conn.reducers.on_create_room(move |ctx, _code| {
+                    if let Status::Failed(err) = &ctx.event.status {
+                        let _ = tx.send(format!("Create failed: {err}"));
+                    }
+                });
+                let tx = ui_tx.clone();
+                client.conn.reducers.on_join_room(move |ctx, _code| {
+                    if let Status::Failed(err) = &ctx.event.status {
+                        let _ = tx.send(format!("Join failed: {err}"));
+                    }
+                });
+                callbacks_registered = true;
+            }
+        }
+
+        if let (Some(client), Some(action)) = (net.as_mut(), pending_action.as_ref()) {
+            let Some(identity) = client.conn.try_identity() else {
+                next_frame().await;
+                continue;
+            };
+            let room_code = match action {
+                PendingAction::Create(code) => code,
+                PendingAction::Join(code) => code,
+            };
+            let room_exists = client
+                .conn
+                .db
+                .room()
+                .iter()
+                .any(|room| room.code == *room_code);
+            let player_exists = client
+                .conn
+                .db
+                .player()
+                .iter()
+                .any(|player| player.room_code == *room_code && player.identity == identity);
+            if room_exists && player_exists {
+                client.room_code = Some(room_code.clone());
+                mode = UiMode::Lobby;
+                pending_action = None;
+                ui_message = None;
             }
         }
 
         next_frame().await;
     }
+}
+
+fn spawn_connect(sender: Sender<Result<NetClient, spacetimedb_sdk::Error>>) {
+    thread::spawn(move || {
+        let _ = sender.send(NetClient::connect());
+    });
+}
+
+fn draw_button(x: f32, y: f32, w: f32, h: f32, label: &str, active: bool, enabled: bool) -> bool {
+    let (mx, my) = mouse_position();
+    let rect = Rect::new(x, y, w, h);
+    let hovered = mx >= rect.x && mx <= rect.x + rect.w && my >= rect.y && my <= rect.y + rect.h;
+    let clicked = enabled && hovered && is_mouse_button_pressed(MouseButton::Left);
+
+    let bg = if !enabled {
+        Color::from_rgba(60, 60, 60, 255)
+    } else if active {
+        Color::from_rgba(70, 110, 200, 255)
+    } else if hovered {
+        Color::from_rgba(90, 90, 90, 255)
+    } else {
+        Color::from_rgba(70, 70, 70, 255)
+    };
+
+    draw_rectangle(x, y, w, h, bg);
+    draw_rectangle_lines(x, y, w, h, 2.0, WHITE);
+    draw_text(label, x + 10.0, y + h * 0.65, 20.0, WHITE);
+
+    clicked
+}
+
+fn draw_input_box(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    placeholder: &str,
+    value: &str,
+    focused: bool,
+) -> bool {
+    let (mx, my) = mouse_position();
+    let rect = Rect::new(x, y, w, h);
+    let hovered = mx >= rect.x && mx <= rect.x + rect.w && my >= rect.y && my <= rect.y + rect.h;
+    let clicked = hovered && is_mouse_button_pressed(MouseButton::Left);
+
+    let border = if focused {
+        Color::from_rgba(120, 160, 255, 255)
+    } else {
+        Color::from_rgba(160, 160, 160, 255)
+    };
+
+    draw_rectangle(x, y, w, h, Color::from_rgba(30, 30, 30, 255));
+    draw_rectangle_lines(x, y, w, h, 2.0, border);
+
+    if value.is_empty() && !focused {
+        draw_text(placeholder, x + 10.0, y + h * 0.65, 18.0, Color::from_rgba(140, 140, 140, 255));
+    } else {
+        draw_text(value, x + 10.0, y + h * 0.65, 20.0, WHITE);
+    }
+
+    clicked
 }
 
 fn collect_input_bits() -> u16 {

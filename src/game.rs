@@ -3,7 +3,7 @@ use crate::{
     input::Input,
 };
 // use macroquad::miniquad::date::now;
-use std::{boxed::Box, sync::mpsc::{Receiver, Sender}};
+use std::boxed::Box;
 
 pub struct Game {
     pub players: Vec<Box<dyn Player>>,
@@ -21,15 +21,13 @@ impl Default for Game {
 }
 
 pub trait Player {
-    fn on_next_piece(&mut self, Tetromino: Tetromino);
+    fn on_next_piece(&mut self, tetromino: Tetromino);
 
     fn do_work(&self) {}
 }
 
 pub struct Human {
     board: Box<Board>,
-    recv: Receiver<>,
-    sender: Sender<>
     pub input: Input,
 }
 
